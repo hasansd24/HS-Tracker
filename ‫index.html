@@ -287,7 +287,12 @@
   .day-label-wrap {
     text-align: center;
     min-width: 0;
+    cursor: pointer;
+    padding: 6px 8px;
+    border-radius: 12px;
+    transition: background 0.2s;
   }
+  .day-label-wrap:active { background: var(--glass-bg); }
 
   .day-label {
     font-size: 22px;
@@ -306,6 +311,16 @@
     text-transform: uppercase;
     letter-spacing: 0.12em;
     margin-top: 4px;
+  }
+
+  .day-sub.not-today {
+    color: var(--accent);
+    text-shadow: 0 0 8px var(--accent-glow);
+  }
+  .day-sub.not-today::after {
+    content: ' · tap for today';
+    color: var(--text-faint);
+    text-shadow: none;
   }
 
   /* ============ TABS ============ */
@@ -1165,7 +1180,7 @@
   <!-- Day nav -->
   <div class="day-nav">
     <button class="nav-btn" id="prevDay" aria-label="Previous">‹</button>
-    <div class="day-label-wrap">
+    <div class="day-label-wrap" id="dayLabelWrap">
       <div class="day-label" id="dayLabel">—</div>
       <div class="day-sub" id="daySub">—</div>
     </div>
@@ -1578,7 +1593,16 @@ const SEED = {
   }
 };
 
-let state = { days: {}, currentDate: '2026-05-06', view: 'today', settings: { theme: 'ocean', apiKey: '', targets: null } };
+// Qatar timezone helper (UTC+3, no DST)
+function qatarTodayISO() {
+  const now = new Date();
+  // Convert to Qatar time by adjusting UTC offset
+  const qatarMs = now.getTime() + (now.getTimezoneOffset() * 60000) + (3 * 3600000);
+  const qatar = new Date(qatarMs);
+  return qatar.toISOString().slice(0, 10);
+}
+
+let state = { days: {}, currentDate: qatarTodayISO(), view: 'today', settings: { theme: 'ocean', apiKey: '', targets: null } };
 const STORAGE_KEY = 'hs-tracker-v3';
 
 function loadState() {
@@ -1587,12 +1611,13 @@ function loadState() {
     if (stored) {
       const p = JSON.parse(stored);
       state.days = p.days || {};
-      state.currentDate = p.currentDate || '2026-05-06';
       if (p.settings) state.settings = Object.assign(state.settings, p.settings);
       Object.keys(SEED).forEach(d => { if (!state.days[d]) state.days[d] = SEED[d]; });
     } else {
       state.days = JSON.parse(JSON.stringify(SEED));
     }
+    // Always start on today in Qatar time when the app opens
+    state.currentDate = qatarTodayISO();
     if (!state.days[state.currentDate]) state.days[state.currentDate] = blankDay();
     // Apply user-saved targets if any
     if (state.settings.targets) {
@@ -1600,6 +1625,7 @@ function loadState() {
     }
   } catch (e) {
     state.days = JSON.parse(JSON.stringify(SEED));
+    state.currentDate = qatarTodayISO();
   }
 }
 
@@ -1623,10 +1649,12 @@ function fmtDay(iso) {
 }
 
 function fmtSub(iso) {
-  const today = new Date(); today.setHours(0,0,0,0);
+  const todayIso = qatarTodayISO();
+  if (iso === todayIso) return 'Today';
+  // Compute yesterday/tomorrow in Qatar time
   const target = isoToDate(iso);
+  const today = isoToDate(todayIso);
   const diff = Math.round((target - today) / 86400000);
-  if (diff === 0) return 'Today';
   if (diff === -1) return 'Yesterday';
   if (diff === 1) return 'Tomorrow';
   return iso;
@@ -1634,8 +1662,8 @@ function fmtSub(iso) {
 
 function nicotineStreak() {
   const quit = isoToDate(CONFIG.nicotineQuitDate);
-  const now = new Date(); now.setHours(0,0,0,0);
-  return Math.max(0, Math.floor((now - quit) / 86400000) + 1);
+  const todayQatar = isoToDate(qatarTodayISO());
+  return Math.max(0, Math.floor((todayQatar - quit) / 86400000) + 1);
 }
 
 function getDay(iso) { if (!state.days[iso]) state.days[iso] = blankDay(); return state.days[iso]; }
@@ -1661,12 +1689,24 @@ function escapeHtml(s) {
 function render() {
   document.getElementById('streakNum').textContent = nicotineStreak();
   document.getElementById('dayLabel').textContent = fmtDay(state.currentDate);
-  document.getElementById('daySub').textContent = fmtSub(state.currentDate);
+  const subLabel = fmtSub(state.currentDate);
+  const subEl = document.getElementById('daySub');
+  subEl.textContent = subLabel;
+  // Highlight when not on today's date so user knows
+  subEl.classList.toggle('not-today', subLabel !== 'Today');
   if (state.view === 'today') renderToday();
   if (state.view === 'trends') renderTrends();
   if (state.view === 'supps') renderSupps();
   if (state.view === 'insights') renderInsights();
   if (state.view === 'settings') renderSettings();
+}
+
+function jumpToToday() {
+  const today = qatarTodayISO();
+  state.currentDate = today;
+  if (!state.days[today]) state.days[today] = blankDay();
+  saveState();
+  render();
 }
 
 function renderSettings() {
@@ -2640,9 +2680,41 @@ function setView(v) {
 
 document.getElementById('prevDay').addEventListener('click', () => changeDay(-1));
 document.getElementById('nextDay').addEventListener('click', () => changeDay(1));
+document.getElementById('dayLabelWrap').addEventListener('click', jumpToToday);
 document.querySelectorAll('.tabs .tab').forEach(b => b.addEventListener('click', () => setView(b.dataset.tab)));
 document.querySelectorAll('.tab-bar-item').forEach(b => b.addEventListener('click', () => setView(b.dataset.tab)));
 document.getElementById('heroWeight').addEventListener('click', openWeightModal);
+
+// Auto-rollover: when the app is reopened or comes back to focus and a new day has started in Qatar, jump to it
+let lastSeenQatarDate = qatarTodayISO();
+
+function checkDayRollover() {
+  const nowQatar = qatarTodayISO();
+  if (nowQatar !== lastSeenQatarDate) {
+    lastSeenQatarDate = nowQatar;
+    // If the user was on the previous "today", advance to the new today automatically
+    // If they were browsing past dates, leave them alone but refresh streak/labels
+    const wasOnToday = state.currentDate === lastSeenQatarDate || state.days[state.currentDate]?.__wasToday;
+    if (wasOnToday || state.view === 'today') {
+      state.currentDate = nowQatar;
+      if (!state.days[nowQatar]) state.days[nowQatar] = blankDay();
+      saveState();
+    }
+    render();
+  } else {
+    // Same day, just refresh streak counter (in case it ticked)
+    document.getElementById('streakNum').textContent = nicotineStreak();
+  }
+}
+
+// Check when the tab regains focus (most common case on iPhone)
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) checkDayRollover();
+});
+window.addEventListener('focus', checkDayRollover);
+
+// Also check every 60 seconds while open
+setInterval(checkDayRollover, 60000);
 
 // Scroll-based header hide
 let lastScrollY = 0;
